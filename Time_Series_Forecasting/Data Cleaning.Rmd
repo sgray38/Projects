@@ -1,0 +1,334 @@
+---
+title: "Cleaning Data"
+author: "Sage Gray"
+date: "2025-03-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(regclass)
+library(fpp3)
+library(zoo)
+library(plotly)
+```
+
+
+```{r data}
+
+#Probably more we can do with review_id
+ash_rev <- read.csv('train-data/ashville_reviews.csv')
+den_rev <- read.csv('train-data/denver_reviews.csv')
+haw_rev <- read.csv('train-data/hawaii_reviews.csv')
+```
+
+Check for missing/erroneous info
+```{r}
+which(is.na(ash_rev))
+which(is.na(den_rev))
+which(is.na(haw_rev))
+#No NA's
+```
+
+Convert Date column into readable dates
+```{r}
+haw_rev <- haw_rev |>
+  mutate(date = as_date(date)) |>
+  mutate(date = yearmonth(date)) |>
+  group_by(date)|>
+  summarize(n_reviews = n())
+haw_rev
+
+den_rev <- den_rev |>
+  mutate(date = as_date(date)) |>
+  mutate(date = yearmonth(date)) |>
+  group_by(date)|>
+  summarize(n_reviews = n())
+  
+ash_rev <- ash_rev |>
+  mutate(date = as_date(date)) |>
+  mutate(date = yearmonth(date)) |>
+  group_by(date)|>
+  summarize(n_reviews = n())
+
+
+merged_df <- merge(den_rev, haw_rev, by= "date", all = TRUE)
+merged_df <- merge(merged_df, ash_rev, by = "date", all = TRUE)
+names(merged_df) <- c("date", "denver_n_reviews", "hawaii_n_reviews", "ash_n_reviews")
+merged_df[is.na(merged_df)] <- 0
+merged_df
+```
+export df as csv
+```{r}
+write.csv(merged_df,"merged_df.csv", row.names = FALSE)
+```
+
+
+```{r}
+reviews <- read.csv("merged_df.csv")
+
+reviews <- reviews |>
+  mutate(date = yearmonth(date))|>
+  tsibble(index = date)
+
+reviews |>
+  autoplot(denver_n_reviews) |>
+  ggplotly()
+
+#DENVER: Jan 2020 - Aug 2020
+
+reviews |>
+  autoplot(hawaii_n_reviews) |>
+  ggplotly()
+#HAWAII: Jan 2020 - Aug 2020, extra dips in 2021
+
+reviews |>
+  autoplot(ash_n_reviews) |>
+  ggplotly()
+#ASHVILLE: Feb 2020 - Aug 2020, extra dips in OCT 2020 to May 2021, Oct 2021 to May 2022
+```
+
+Interpolate some COVID
+```{r}
+inter_reviews <- reviews
+ inter_reviews <- inter_reviews |>
+  relocate(hawaii_n_reviews, .after = last_col())
+index = which(inter_reviews$date == yearmonth("2020 Jan"))
+
+inter_reviews[index,]
+for(i in index:(index + 7)){
+  for(j in 2:4){
+    inter_reviews[i,j] <- NA
+  }
+    print(inter_reviews[i,])
+}
+
+for(i in (index+7):(index+14)){
+  inter_reviews[i, 4] <- NA
+  print(inter_reviews[i,])
+}
+
+# for(i in index:(index + 7)){
+#   for(j in 2:4){
+#     inter_reviews[i,j] <- replace_na(na.approx(j))
+#   }
+# }
+```
+*Predicting*
+*denver*
+```{r}
+inter_reviews[index,]
+pre_covid <- inter_reviews |>
+  filter(date <= yearmonth("2020 Jan"))
+pre_covid
+
+denver_pred <- pre_covid[,1:2]
+
+
+denver_pred
+train <- head(denver_pred, -8)
+test <- tail(denver_pred, 8)
+train_roll_windows <- train |>
+  stretch_tsibble(.init = 100, .step = 8)
+table(train_roll_windows$.id)
+
+fit <- train_roll_windows |>
+  model(
+    ts = TSLM(denver_n_reviews ~ trend() + season()),
+    arima = ARIMA(denver_n_reviews),
+    ets = ETS(denver_n_reviews)
+  )
+
+fit |>
+  forecast(h = 12) |>
+  accuracy(test) |>
+  arrange(RMSE)
+
+final_fit <- denver_pred |> 
+  model(ARIMA(denver_n_reviews))
+
+
+predicted_vals <- final_fit |>
+  forecast(h = 8)
+predicted_denver <- predicted_vals[,2]
+predicted_denver[,2] <- predicted_vals[,4]
+colnames(predicted_denver)[2] <- "denver_n_reviews"
+
+predicted_denver
+
+denver_pred <- bind_rows(denver_pred, predicted_denver)
+denver_pred |>
+  autoplot()
+reviews |>
+  filter(date == yearmonth("2020 Sep"))
+denver_pred
+
+nrow(denver_pred)
+nrow(reviews)
+denver_pred <- bind_rows(denver_pred, reviews[141:166,1:2])
+denver_pred |>
+  autoplot()
+final_fit |>
+  forecast(h = 10) |>
+  autoplot(reviews)
+```
+*ashville*
+```{r}
+ash_pred <- pre_covid[,1]
+ash_pred <- append(ash_pred, pre_covid[,3])
+ash_pred <- data.frame(ash_pred)
+ash_pred <- ash_pred |>
+  tsibble()
+ash_pred
+
+train <- head(ash_pred, -8)
+test <- tail(ash_pred, 8)
+train_roll_windows <- train |>
+  stretch_tsibble(.init = 100, .step = 8)
+table(train_roll_windows$.id)
+
+
+fit <- train_roll_windows |>
+  model(
+    ts = TSLM(ash_n_reviews ~ trend() + season()),
+    arima = ARIMA(ash_n_reviews),
+    ets = ETS(ash_n_reviews)
+  )
+
+fit |>
+  forecast(h = 8) |>
+  accuracy(test) |>
+  arrange(RMSE)
+
+final_fit <- ash_pred |> 
+  model(ARIMA(ash_n_reviews))
+
+
+predicted_vals <- final_fit |>
+  forecast(h = 8)
+predicted_ashville <- predicted_vals[,2]
+predicted_ashville[,2] <- predicted_vals[,4]
+predicted_ashville
+
+colnames(predicted_ashville)[2] <- "ash_n_reviews"
+predicted_ashville
+
+ash_pred <- bind_rows(ash_pred, predicted_ashville)
+ash_pred |>
+  autoplot()
+reviews |>
+  filter(date == yearmonth("2020 Sep"))
+ash_pred
+
+nrow(ash_pred)
+nrow(reviews)
+reviews <- reviews |>
+  relocate(denver_n_reviews, .after = last_col()) |>
+  relocate(hawaii_n_reviews, .after = last_col())
+reviews
+ash_pred <- bind_rows(ash_pred, reviews[141:166,1:2])
+ash_pred |>
+  autoplot()
+final_fit |>
+  forecast(h = 10) |>
+  autoplot(reviews)
+```
+*hawaii*
+```{r}
+hawaii_pred <- pre_covid[,1]
+hawaii_pred <- append(hawaii_pred, pre_covid[,4])
+hawaii_pred <- data.frame(hawaii_pred)
+hawaii_pred <- hawaii_pred |>
+  tsibble()
+hawaii_pred
+
+train <- head(hawaii_pred, -8)
+test <- tail(hawaii_pred, 8)
+train_roll_windows <- train |>
+  stretch_tsibble(.init = 100, .step = 8)
+table(train_roll_windows$.id)
+
+
+fit <- train_roll_windows |>
+  model(
+    ts = TSLM(hawaii_n_reviews ~ trend() + season()),
+    arima = ARIMA(hawaii_n_reviews),
+    ets = ETS(hawaii_n_reviews)
+  )
+
+fit |>
+  forecast(h = 15) |>
+  accuracy(test) |>
+  arrange(RMSE)
+
+final_fit <- hawaii_pred |> 
+  model(ARIMA(hawaii_n_reviews))
+
+
+predicted_vals <- final_fit |>
+  forecast(h = 15)
+predicted_hawaii <- predicted_vals[,2]
+predicted_hawaii[,2] <- predicted_vals[,4]
+predicted_hawaii
+
+colnames(predicted_hawaii)[2] <- "hawaii_n_reviews"
+predicted_hawaii
+
+hawaii_pred <- bind_rows(hawaii_pred, predicted_hawaii)
+hawaii_pred |>
+  autoplot()
+reviews |>
+  filter(date == yearmonth("2020 Sep"))
+hawaii_pred
+
+nrow(ash_pred)
+nrow(reviews)
+reviews <- reviews |>
+  relocate(denver_n_reviews, .after = last_col()) |>
+  relocate(ash_n_reviews, .after = last_col())
+reviews
+hawaii_pred <- bind_rows(hawaii_pred, reviews[148:166,1:2])
+hawaii_pred |>
+  autoplot() |>
+  ggplotly()
+final_fit |>
+  forecast(h = 15) |>
+  autoplot(reviews)
+```
+
+
+*Linear Interpolation*
+```{r}
+inter_reviews$denver_n_reviews <- replace_na(na.approx(inter_reviews$denver_n_reviews))
+inter_reviews$hawaii_n_reviews <- replace_na(na.approx(inter_reviews$hawaii_n_reviews))
+inter_reviews$ash_n_reviews <- replace_na(na.approx(inter_reviews$ash_n_reviews))
+
+inter_reviews |>
+  autoplot(denver_n_reviews)
+
+inter_reviews |>
+  autoplot(ash_n_reviews)
+
+inter_reviews |>
+  autoplot(hawaii_n_reviews) |>
+  ggplotly()
+```
+
+```{r}
+write.csv(inter_reviews, "inter_reviews.csv", row.names = FALSE)
+denver_pred |>
+  autoplot() #DONE
+ash_pred |>
+  autoplot() #DONE
+hawaii_pred |>
+  autoplot()
+denver_pred
+ash_pred
+covid_predict <- denver_pred
+covid_predict <- merge(denver_pred, ash_pred, by = "date", all = TRUE)
+covid_predict <- merge(covid_predict, hawaii_pred, by = "date", all = TRUE)
+covid_predict
+
+write.csv(covid_predict,"covid_predict.csv", row.names = FALSE)
+```
+
