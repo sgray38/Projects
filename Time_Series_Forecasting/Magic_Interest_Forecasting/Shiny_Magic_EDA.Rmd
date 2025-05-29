@@ -1,0 +1,455 @@
+---
+title: "Shiny_Magic"
+author: "Sage Gray"
+date: "2025-03-10"
+output: html_document
+---
+## List of Requirements
+- Full Plot #DONE
+  - Explanation: This is a google trend dataset containing the relative interest in Magic: The Gathering from 2018 to early 2025. Since the data is normalized, the minimum value in mtg_interest is 55 and the maximum value is 100. This is relative to the time frame, with 100 representing the maximum interest and 55 representing that the term is half as popular.
+- Optional autocorrelation plot and seasonality chart #DONE
+  - Autocorrelation Explanation
+  - Seasonality Explanation
+- Decomposition Explanation: The top graph is the original plot. The second is trend. STL uses LOESS smoothing to calculate a smooth curve for this trend to average out any outlying fluctuations. Beneath that is "season_year", the seasonality of the data. This shows the repetition of peaks and valleys without the trend clouding it. Finally, there's the "remainder", the irregularities found in the data that neither trend nor seasonality can account for.
+- TS Decomp plot #DONE 
+  - Contains:
+    - TS Decomp method: STL
+    - why you used it: One of the reasons STL was used over classical decomposition because the seasonality isn't constant. The interest in Magic changes for a multitude of reasons, so while Seasonality is still strong it can't be assumed that it's going to be constant and STL can handle that better than classical decomp. And since the data isn't very complex, STL won't eat up too many resources.
+  - Interpretation of the outputs of the decomp plot
+- Cool Additional Feature #DONE
+  - I want to search up important moments from MTG history, including set releases and major announcements, and display a window of the week before, of, and after the release to see if it had an impact on popularity.
+- Create Shiny App
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(fpp3)
+library(plotly)
+library(dplyr)
+library(zoo)
+library(fpp3)
+library(urca)
+```
+
+EDA
+
+```{r}
+
+mtg_ts <- read.csv("mtg_timeline.csv", skip = 1)
+names(mtg_ts) <- c("Week", "mtg_interest")
+head(mtg_ts)
+
+min(mtg_ts$mtg_interest)
+summary(mtg_ts)
+glimpse(mtg_ts)
+```
+
+Convert to tsibble
+```{r}
+
+mtg_ts <- mtg_ts |>
+  mutate(Week = yearweek(Week)) |>
+  tsibble(index = Week)
+
+#Any Gaps?
+mtg_ts <- mtg_ts|>
+  fill_gaps()
+sum(is.na(mtg_ts)) #uh oh
+
+# I think linear interpolation makes the most sense, move smoothly from previous to next value
+#Sure
+mtg_ts <- mtg_ts |>
+  mutate(mtg_interest = replace_na(na.approx(mtg_interest)))
+mtg_ts
+```
+
+Check some plots
+```{r}
+autoplot(mtg_ts)
+max(mtg_ts$Week)
+```
+
+Prototyping non-shiny version
+```{r}
+#Autoplot
+mtg_ts |>
+  autoplot()
+
+#ggplotly
+mtg_ts |>
+  autoplot() |>
+  ggplotly()
+
+#STL Decomp
+mtg_comps <- mtg_ts |>
+  model(STL(mtg_interest)) |>
+  components()
+
+mtg_comps |>
+  autoplot() #Some clear seasonality
+
+#Season Plot
+mtg_comps |>
+  gg_season(season_year)
+#gg_season(mtg_comps$season_year)
+#Autocorrelation
+ACFs <- ACF(mtg_ts, mtg_interest)
+ACFs |>
+  arrange(desc(acf)) #1 week lag is the most correlated value
+ACFs |>
+  autoplot() |>
+  ggplotly() #Trend dominates the seasonality, but there is still some seasonality in there.
+
+``` 
+
+List of notable events in MTG
+```{r}
+sets <- c(
+  'Rivals of Ixalan',
+  'Battlebond',
+  'Mystery Booster',
+  'Dominaria',
+  'Guilds of Ravnica',
+  'Ravnica Allegiance',
+  'War of the Spark',
+  'Throne of Eldraine',
+  'Theros Beyond Death',
+  'Ikoria: Lair of Behemoths',
+  'Zendikar Rising',
+  'Commander Legends',
+  'Kaldheim',
+  'Time Spiral Remastered',
+  'Strixhaven: School of Mages',
+  'Modern Horizons 2',
+  'Dungeons & Dragons',
+  'Innistrad: Midnight Hunt',
+  'Innistrad: Crimson Vow',
+  'Kamigawa: Neon Dynasty',
+  'Streets of New Capenna',
+  'Dominaria United',
+  "The Brothers' War",
+  'Dominaria Remastered ',
+  'Phyrexia: All Will Be One',
+  'March of the Machine',
+  'March of the Machine: The Aftermath',
+  'Commander Masters',
+  'The Lord of the Rings: Tales of Middle-earth',
+  'Wilds of Eldraine',
+  'The Lost Caverns of Ixalan',
+  'Murders at Karlov Manor',
+  'Ravnica Remastered ',
+  'Outlaws of Thunder Junction',
+  'Modern Horizons 3',
+  'Bloomburrow',
+  'Duskmourn: House of Horror',
+  'Innistrad Remastered '
+)
+#TODO: Get Dates for Set Releases
+set_dates <- c(
+  'January 13, 2018', #Ixalan
+  'June 8, 2018', #Battlebond
+  'March 13, 2020', #Mystery Booster
+  'April 21, 2018', #Dominaria
+  'September 29, 2018', #Guilds
+  'January 19, 2019', #Ravnica Allegiance
+  'April 27, 2019', #War of the Spark
+  'September 28, 2019', #Throne
+  'January 17, 2020', #Theros
+  'April 17, 2020', #Ikoria
+  'September 18, 2020', #Zendikar
+  'November 20, 2020', #Commander Legends
+  'January 29, 2021', #Kaldheim
+  'March 19, 2021', #Time Spiral Remastered
+  'April 16, 2021', #Strixhaven
+  'June 18, 2021', #Modern Horizons 2
+  'July 23, 2021', #DnD
+  'September 24, 2021', #Innistrad
+  'November 19, 2021', #Innistrad 2
+  'February 18, 2022', #Kamigawa
+  'April 29, 2022', #Streets
+  'September 9, 2022', #Dominaria U
+  'November 18, 2022', #Brother's War
+  'January 13, 2023', #Dominaria Remastered
+  'February 10, 2023', #Phy
+  'April 21, 2023', #March
+  'May 12, 2023', #March +
+  'August 4, 2023', #Com Mast
+  'June 23, 2023', #LOTR
+  'September 8, 2023', #Wilds
+  'November 17, 2023', #Lost Caverns
+  'February 9, 2024', #Murders
+  'January 12, 2024', #Rav Rem
+  'April 19, 2024', #Outlaws
+  'June 14, 2024', #MH3
+  'August 2, 2024', #Bloomburrow
+  'September 27, 2024', #Duskmourn
+  'January 24, 2025' #Innistrad Rem
+)
+#length(set_dates) == length(sets)
+
+announcements <- c(
+  'Signature Spellbook: Jace',
+  'Dominaria Frame, Template, and Rules Changes',
+  'Commander Anthology Vol. II Legends and Decklists',
+  'Deathrite/Probe Ban Legacy',
+  'State of Design 2018',
+  'Guilds of Ravnica Guild Kits',
+  'Ravnica Allegiance Guild Kits',
+  'No More MSRP',
+  'MTG Arena Banned and Restricted Announcement (2019)',
+  'Krark-Clan Ban Modern',
+  'Gitaxian Probe Pauper Ban',
+  'The London Mulligan',
+  'Pauper Comes to Paper',
+  'Commander Banned List and Philosophy Update',
+  'Hogaak Ban',
+  'Announcing the Pioneer Format',
+  'Field of the Dead Ban Standard',
+  'Oko Ban Standard',
+  'Oko Ban Pioneer',
+  'Oko Ban Modern',
+  'Golos, Once upon a Time, Breach bans',
+  'Lutri Ban',
+  'Lurrus Ban Legacy',
+  'Companion Rules Change',
+  'Teferi/Cauldron Familiar Ban',
+  'Announcement Day',
+  'Uro Ban',
+  'Omnath Ban',
+  "Thassa's Oracle Ban",
+  'Middle Earth is Legal',
+  'Pricing Update',
+  'Spellslingers Announcement',
+  '2023 Announcements',
+  'Meathook and Yorion Bans',
+  'Unfinity and Stickers',
+  'MTG 30th Anniversary Debacle',
+  'MTG And Marvel',
+  'Generative AI Controversy',
+  'Miku Secret Lair',
+  'Mystery Booster 2',
+  'Controversial Commander Ban',
+  'Wizards Takes Over Commander',
+  'First Marvel Drop',
+  'MSRP Returns'
+)
+length(announcements)
+
+announcement_dates <- c(
+  'Mar 20, 2018', #Signature Spellbook Jace
+  'Mar 21, 2018', #Dominaria Frame, Template, Rules
+  'May 8, 2018', #Commander Anthology
+  'Jul 2, 2018', #Banned and Restricted 2018
+  'Aug 20, 2018', #State of Design
+  'Sep 25, 2018', #Guildkits 1
+  'Jan 15, 2019', #Guildkits 2
+  'Jan 21, 2019', #B&R
+  'Feb 14, 2019', #Arena Banned And Restricted
+  'Feb 18, 2019', #No More MSRP
+  'May 20, 2019', #B&R
+  'Jun 3, 2019', #London Mulligan
+  'Jun 27, 2019', #Pauper
+  'Jul 8, 2019', #Commander ban list
+  'Aug 26, 2019', #B&R
+  'Oct 21, 2019', #Pioneer
+  'Oct 21, 2019', #B&R
+  'Nov 18, 2019', #B&R
+  'Dec 16, 2019', #Oko Ban, pioneer
+  'Jan 13, 2020', #Oko Ban, modern
+  'Mar 9, 2020', #Golos, OUAT, Breach ban
+  'Apr 13, 2020', #Lutri Ban
+  'May 18, 2020', #Lurrus Ban
+  'Jun 1, 2020', # Companion rule change
+  'Aug 3, 2020', #Teferi/Cauldron Familiar Ban
+  'Sep 1, 2020', #Announcement Day
+  'September 28, 2020', #Uro Ban
+  'Oct 12, 2020', #Omnath Ban
+  'May 19, 2021', #Thassa's Oracle Ban
+  'Aug 24, 2021', #Middle Earth legal
+  'Apr 19, 2022', #Pricing Update
+  'Aug 12, 2022', #Spellslingers
+  'Aug 18, 2022', #2023 Announcements
+  'Oct 4, 2022', #30th Debacle
+  'Oct 10, 2022', #Meathook and Yorion Bans
+  'Oct 18, 2022', #Unfinity Rules Update
+  'Oct 23, 2023', #MTG and Marvel
+  'Jan 7, 2024', #Generative AI
+  'Apr 29, 2024', #Miku
+  'Aug 2, 2024', #Mystery Booster 2
+  'Sep 23, 2024', #Controversial Commander Ban
+  'Sep 30, 2024', #Wizards take over commander
+  'Oct 18, 2024', #First marvel Drop
+  'Oct 25, 2024' #MSRP Returns
+)
+
+
+set_df <- data.frame(Sets = sets, Week = set_dates)
+
+announce_df <- data.frame(Announcements = announcements, Week = announcement_dates)
+
+set_df <- set_df |>
+  mutate(Week = yearweek(Week))
+
+announce_df <- announce_df |>
+  mutate(Week = yearweek(Week))
+announce_df
+#Got em in weeks now, I can cross reference weeks and grab info before and after
+
+```
+
+```{r}
+# pick <- "Hogaak Ban"
+# pick_date <- announce_df |>
+#   filter(Announcements == pick) |>
+#   pull(Dates)
+
+mtg_ts |>
+  autoplot() +
+  geom_line(aes(pick_date), color = "red") + 
+  geom_line(aes(pick_date + 10), color = "green") + 
+  geom_line(aes(pick_date - 10), color = "green")
+new_graph <- mtg_ts |>
+  filter(Week >= pick_date-20 & Week <= pick_date+20)
+new_graph |>
+  autoplot() +
+  geom_line(aes(pick_date), color = "red")
+```
+
+*Forecasting*
+
+#Load it in
+```{r}
+mtg_ts <- read.csv("mtg_timeline.csv", skip = 1)
+names(mtg_ts) <- c("Week", "mtg_interest")
+mtg_ts <- mtg_ts |>
+  mutate(Week = yearweek(Week)) |>
+  tsibble(index = Week)
+
+#Any Gaps?
+mtg_ts <- mtg_ts|>
+  fill_gaps()
+sum(is.na(mtg_ts)) #uh oh
+
+# I think linear interpolation makes the most sense, move smoothly from previous to next value
+#Sure
+mtg_ts <- mtg_ts |>
+  mutate(mtg_interest = replace_na(na.approx(mtg_interest)))
+```
+
+```{r}
+mtg_ts
+train<-head(mtg_ts,-24)
+test<-tail(mtg_ts,24)
+
+
+train_roll_windows<-train %>% 
+  stretch_tsibble(.init=96,.step=24)
+
+table(train_roll_windows$.id)
+#Make some models
+
+#simples
+sfits <- train |>
+  model(mean = MEAN(mtg_interest),
+        naive = NAIVE(mtg_interest),
+        snaive = SNAIVE(mtg_interest),
+        sdrift = SNAIVE(mtg_interest ~ drift())
+        )
+
+
+#Seasonal Drift looks like the most accurate, but still not great
+sfits |>
+  forecast(h = '24 weeks')|>
+  autoplot(test)
+
+#Seasonal Drift
+sdrift <- train |>
+  model(SNAIVE(mtg_interest ~ drift()))
+#TSLM
+tslm <- train |>
+  model(TSLM(mtg_interest ~ trend() + season()))
+
+#Exponential Smoothing
+ets <- train |>
+  model(ETS(mtg_interest))
+
+#arima
+arima <- train |>
+  model(ARIMA(mtg_interest))
+
+# Do some forecast accuracy
+sdrift |>
+  forecast(h = 24) |>
+  accuracy(test)
+ets |>  
+  forecast(h = 24) |>
+  accuracy(test)
+
+tslm|>
+  forecast(h = 24) |>
+  accuracy(test)
+
+#Real good here
+arima |>
+  forecast(h = 24) |>
+  accuracy(test)
+
+
+
+
+
+
+#Cross validate with rolling windows
+ fit <- train_roll_windows |> 
+   model(
+     arima = ARIMA(mtg_interest)
+   )
+
+ #Looks great
+fit %>% 
+   forecast(h=24) %>% 
+   accuracy(test) 
+ 
+arima |>
+   forecast(h = 24) |>
+   autoplot(test)
+ 
+arima |>
+   forecast(h = 24) |>
+   autoplot(mtg_ts, level = NULL)
+  
+
+
+full_sdrift <- mtg_ts |>
+  model(SNAIVE(mtg_interest ~ drift()))
+
+full_tslm <- mtg_ts |>
+  model(TSLM(mtg_interest ~ trend() + season()))
+
+full_ets <- mtg_ts |>
+  model(ETS(mtg_interest))
+
+full_arima <- mtg_ts |>
+  model(ARIMA(mtg_interest))
+
+
+#This is close, but it goes above 100 
+full_sdrift |>
+  forecast(h = 24) |>
+  autoplot(mtg_ts, level = NULL)
+
+#This one seems reasonable
+full_tslm |>
+  forecast(h = 24) |>
+  autoplot(mtg_ts, level = NULL)
+
+#This one curves, doesn't seem to fit with the rest of the data
+full_ets |>
+  forecast(h = 24) |>
+  autoplot(mtg_ts, level = NULL)
+
+#This one is jittery, but it's a bit conservative in its ups and downs
+full_arima |>
+  forecast(h = 24) |>
+  autoplot(mtg_ts, level = NULL)
+```
+
