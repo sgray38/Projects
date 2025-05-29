@@ -1,1 +1,3 @@
-
+This project involved my team and I forecasting the number of reviews the website could recieve in the locations Hawaii, Denver, and Asheville. 
+The EDA involves determining which external factors could have lead to the patterns seen in the data, and how to deal with the COVID drop that occurs in 2020 to create the most accurate predictions for 2023.
+The model selection file contains our efforts to determine the most accurate model given the train/test splits we used, and the final values we found. We came in 5th in the in-class competition with an RMSE of 1446.
