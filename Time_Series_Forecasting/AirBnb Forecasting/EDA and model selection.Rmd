@@ -1,0 +1,183 @@
+---
+title: "Final Code Submission"
+author: "Joey Monachelli"
+date: "2025-04-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(fpp3)
+library(plotly)
+```
+
+
+```{r, making dataframes}
+#full data with the dip at 2020 Apr
+og_reviews<-read.csv("merged_df.csv") %>% 
+  mutate(date=yearmonth(date)) %>% 
+  tsibble()
+
+#full data with a drift to fill the 2020 Apr gap
+reviews<-read.csv("inter_reviews.csv") %>% 
+  mutate(date=yearmonth(date)) %>% 
+  tsibble()
+
+#subset data removing first 69 rows to begin at 2014 Dec (8 years of data)
+sub_reviews<-reviews %>% 
+  filter(date>yearmonth("2014 Nov"))
+
+#covid predicted values and subsetted
+covid_reviews<-read.csv("covid_predict.csv") %>% 
+  mutate(date=yearmonth(date)) %>% 
+  tsibble() %>% 
+  filter(date>yearmonth("2014 Nov"))
+
+
+```
+
+```{r, viz to prove data manipulation reasoning}
+###Original data plot to show the dips
+#Denver
+og_reviews %>% 
+  autoplot(denver_n_reviews) +
+  labs(x = "Date", y = "# of reviews", title = "Denver") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+#Hawaii
+og_reviews %>% 
+  autoplot(hawaii_n_reviews) +
+  labs(x = "Date", y = "# of reviews", title = "Hawaii") +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+#Asheville
+og_reviews %>% 
+  autoplot(ash_n_reviews) +
+  labs(x = "Date", y = "# of reviews", title = "Asheville") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+#Total Reviews
+reviews %>% 
+  autoplot(total_n_reviews)+
+  labs(x = "Date", y = "Total Reviews", title = "Reviews of Vacation Rentals") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+###Total reviews plot to show drift at 2020 Apr
+reviews %>% 
+  autoplot(total_n_reviews)+
+  labs(x = "Date", y = "Total Reviews", title = "Adjusted Reviews") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+###Subset plot of total reviews
+  #Data we are using here and out
+sub_reviews %>% 
+  autoplot(total_n_reviews)
+
+###Covid predicted plot of total reviews
+covid_reviews %>% 
+  autoplot(total_n_reviews)
+```
+
+
+```{r,decomposition/EDA}
+#multiplicative decomp
+cmps <- covid_reviews |>
+  select(total_n_reviews) %>%
+  model(classical_decomposition(total_n_reviews,type = "multiplicative")) |>
+  components()
+
+cmps %>% 
+  autoplot()
+
+ cmps |>
+  gg_season(seasonal)+
+ labs(x = "Date", y = "Seasonal Component", title = "Seasonality of Total Reviews") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+```{r,CV - train/test split - final fit}
+###Splitting data
+train<-head(covid_reviews,-12)
+test<-tail(covid_reviews,12)
+lambda<-guerrero(covid_reviews$total_n_reviews,.period=12)
+
+###Cross-validation
+#Make the windows
+train_roll_windows<-train %>% 
+  stretch_tsibble(.init=48,.step=12)
+
+#fit all models
+fit <- train_roll_windows |> 
+  model(
+    arima = ARIMA(total_n_reviews),
+    arima_bc = ARIMA(box_cox(total_n_reviews, lambda)),
+    
+    ets = ETS(total_n_reviews),
+    ets_bc = ETS(box_cox(total_n_reviews, lambda)),
+    
+    nnetar = NNETAR(total_n_reviews)
+  )
+
+#best AIC
+glance(fit) %>%
+  select(.id,.model,AIC) %>% 
+  arrange(AIC)
+#best RMSE
+fit %>% 
+  forecast(h=12) %>% 
+  accuracy(covid_reviews) %>% 
+  select(.model, RMSE, MAE, MAPE) %>% 
+  arrange(RMSE)
+
+#just a plot for fun to recap what we're dealing with (you can ignore this if you want)
+covid_reviews %>% 
+  autoplot(total_n_reviews)
+
+
+###Fitting best model
+#Make fit
+fit<-train %>% 
+  model(ARIMA(box_cox(total_n_reviews,lambda)))
+
+#plot of forecast of 2022 on test data
+fit %>% 
+  forecast(h=12) %>% 
+  autoplot(test)+
+  labs(x = "Date", y = "Total Reviews", title = "Testing Data") +
+  theme(plot.title = element_text(hjust = 0.5)) 
+#accuracy of above test
+fit %>% 
+  forecast(h=12) %>% 
+  accuracy(test)
+
+###Final Fit
+#make final fit
+final_fit<-covid_reviews %>% 
+  model(ARIMA(box_cox(total_n_reviews,lambda)))
+#residuals and report
+gg_tsresiduals(final_fit)
+
+report(final_fit)
+#plot of final forecast
+final_fit %>% 
+  forecast(h=12) %>% 
+  autoplot(covid_reviews)+
+  labs(x = "Date", y = "Total Reviews", title = "Forecasted Reviews") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+###deliverable
+#making the forecast
+forecast_2023<-final_fit %>% 
+  forecast(h=12) %>% 
+  as_tibble() %>%
+  select(month=date,n_reviews=.mean)
+#if you want to see a table of the forecast
+forecast_2023 %>% 
+  view()
+#creating the csv to turn in
+write.csv(forecast_2023,"C:/Users/jmonache/Desktop/BAS 475/forecast_2023.csv",row.names=FALSE)
+
+```
+
