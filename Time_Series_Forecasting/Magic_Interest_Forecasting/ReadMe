@@ -1,1 +1,2 @@
-
+This project involved me pulling the Google Trends interest graph of Magic: The Gathering from 2018 to early 2025 and breaking down the time series information into Seasonality, Autocoerrelation, and Forecasting plots.
+I included two additional features: Announcements and Set Release 
