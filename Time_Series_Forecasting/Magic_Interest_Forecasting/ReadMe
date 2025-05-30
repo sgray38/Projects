@@ -1,2 +1,2 @@
 This project involved me pulling the Google Trends interest graph of Magic: The Gathering from 2018 to early 2025 and breaking down the time series information into Seasonality, Autocoerrelation, and Forecasting plots.
-I included two additional features: Announcements and Set Release 
+I included two additional dropdown options: Announcements and Set Release. Announcements isolates a window during an announcement on Wizards of the Coast official website and shows the interest in the weeks leading up to and following the announcement. Set Release does the same but for the release of a set.
