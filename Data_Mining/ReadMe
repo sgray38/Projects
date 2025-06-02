@@ -1,1 +1,3 @@
-
+This project was a recommended price prediction for houses listed on Airbnb. I used KMeans Clustering to determine groupings of houses with similar values and ammenities.
+For the price predictions, I used a series of different predictions methods including glmnet, Partitioning, Random Forest, and Linear, Polynomial, and Radial SVMs. I determined Random Forest had the best accuracy and the RMSE was off by $74.
+I came in 6th in the Kaggle competition set up by the professor. 
