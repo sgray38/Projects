@@ -1,3 +1,4 @@
 This project was my attempt at tracking the prices of Magic Cards from the set Innistrad over a week and display the top 5 price changes, both positive and negative.
 This was my first attempt at a product geared towards a customer. I wanted to give new players of Magic a way to track the prices of expensive cards and give them an opportunity to buy the cards they need at the lowest price, giving them some financial leeway.
 This project gave me practice with RSelenium for webscraping, RSQlite for creating and managing SQLite databases, and more Shiny practice as my final product is a Shiny app.
+https://sgray38.shinyapps.io/magic_scrape/
