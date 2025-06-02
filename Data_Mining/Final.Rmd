@@ -1,0 +1,1035 @@
+---
+title: "Final"
+author: "Sage Gray"
+date: "2025-04-23"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(regclass)
+library(fpp3)
+library(tidymodels)
+library(tidyverse)
+library(kknn)
+library(glmnet)
+library(corrplot)
+library(stacks)
+
+
+source("https://tiny.utk.edu/plot_centroids_table.R")
+```
+
+*Load Data*
+```{r}
+LISTING <- read.csv("austin_listings.csv")
+dict <- read.csv("listings_data_dictionary.csv")
+#Drop columns that are unique identifiers
+LISTING <- LISTING |>
+  select(-c("id", "listing_url", "name", "description", "picture_url", "host_url", "host_name", "host_id", "zip_code", "host_since", "host_response_time", "host_response_rate"))
+```
+
+# Find what's missing
+```{r}
+
+colnames(LISTING)
+nameo <- c()
+nahs <- c()
+for(i in 1:ncol(LISTING)){
+  nameo[i] <- colnames(LISTING)[i]
+}
+for(i in 1:ncol(LISTING)){
+    nahs[i] <- sum(is.na(LISTING[,i]))
+}
+
+all_nahs <- data.frame(nameo, nahs )
+
+summary(LISTING$price)
+```
+There are a number of missing data here in the columns "bathrooms", "bedrooms", "beds", "overall_rating", "host_response_rate", and "host_acceptance_rate". 
+- Bathrooms, Bedrooms, and beds can likely be imputed with the median values without causing too much error. 
+- "overall_rating"'s missing values come from the fact that some of these listings have 0 reviews. Replacing the rating with 0 would cause these places to have an unfairly low score, potentially skewing the data lower. It might be better to replace them with the mean value.  
+- "host_acceptance_rate" isn't obvious, so I'll replace with median.
+
+Additionally, we can feature engineer a price-per-person column to potentially help with modeling and predictions
+- price / accommodates
+
+*Replacing NA's*
+```{r}
+cleaned_listing <- LISTING
+cleaned_listing <- cleaned_listing|>
+  mutate(beds = replace_na(beds, median(beds, na.rm = TRUE)))
+#summary(cleaned_listing$beds)
+
+cleaned_listing <- cleaned_listing|>
+  mutate(bathrooms = replace_na(bathrooms, median(bathrooms, na.rm = TRUE)))
+#summary(cleaned_listing$bathrooms)
+
+cleaned_listing <- cleaned_listing|>
+  mutate(bedrooms = replace_na(bedrooms, median(bedrooms, na.rm = TRUE)))
+#summary(cleaned_listing$bedrooms)
+
+cleaned_listing <- cleaned_listing|>
+  mutate(overall_rating = replace_na(overall_rating, mean(overall_rating, na.rm = TRUE)))
+#summary(cleaned_listing$overall_rating)
+
+cleaned_listing <- cleaned_listing|>
+  mutate(host_acceptance_rate = replace_na(host_acceptance_rate, median(host_acceptance_rate, na.rm = TRUE)))
+#summary(cleaned_listing$host_acceptance_rate)
+which(is.na(cleaned_listing))
+
+#Feature Engineering
+cleaned_listing <- cleaned_listing |>
+  mutate(price_per_person = price / accommodates)
+```
+
+*Recipe Makin*
+```{r}
+listing_recipe <- recipe(price ~ ., data = cleaned_listing)  |> 
+               step_YeoJohnson(all_numeric_predictors())  |>       # transform
+               step_lincomb(all_numeric_predictors()) |>           # eliminate possible linear combos
+               step_zv(all_predictors()) |>                 #Scrap zeroes
+               step_nzv(all_predictors()) |>               # eliminate near-zero variance Xs
+               step_corr(all_numeric_predictors())  |>             # eliminate highly correlated Xs
+               step_normalize(all_numeric_predictors()) |>         # scale + center
+               step_dummy(all_nominal_predictors())
+listing_recipe |>
+  prep()
+
+std_listing <- listing_recipe |>
+  prep() |>
+  bake(cleaned_listing)
+std_listing
+```
+
+*Elbow Plottin*
+```{r}
+ss <- c()
+
+for (k in 2:20) {
+  clst <- kmeans(
+    x = std_listing,
+    centers = k,
+    nstart = 10,
+    iter.max = 10
+  )
+  
+  ss[k] <- clst$tot.withinss
+}
+
+plot(ss, type = "b")
+
+#Start at k = 7 and see what we can find
+```
+
+*Start clusterin*
+```{r}
+k <- 8
+clst <- kmeans(
+    x = std_listing,
+    centers = k,
+    nstart = 10,
+    iter.max = 10
+  )
+
+table(clst$cluster)
+
+plot_centroids_table(clst)
+
+```
+*Clustering Labels/Medians*
+```{r}
+std_listing |> 
+  mutate(cluster_label = clst$cluster) |> 
+  group_by(cluster_label) |> 
+  summarise_all(median) |>
+  arrange(desc(price))
+```
+
+
+*Predictions*
+```{r}
+#Split
+cleaned_listing <- cleaned_listing |>
+  select(-price_per_person)
+cleaned_splits <- initial_split(cleaned_listing, prop = 0.8, strata = price)
+cleaned_train <- training(cleaned_splits)
+cleaned_test <- testing(cleaned_splits)
+#Recipe on Train
+listing_recipe <- recipe(price ~ ., data = cleaned_train)  |> 
+               step_YeoJohnson(all_numeric_predictors())  |>       # transform
+               step_lincomb(all_numeric_predictors()) |>           # eliminate possible linear combos
+               step_zv(all_predictors()) |>
+               step_nzv(all_predictors()) |>               # eliminate near-zero variance Xs
+               step_corr(all_numeric_predictors())  |>             # eliminate highly correlated Xs
+               step_normalize(all_numeric_predictors()) |>         # scale + center
+               step_dummy(all_nominal_predictors())
+
+#5 fold cv
+Folds <- vfold_cv(cleaned_train, v = 5)
+# Vanilla model
+listing_vanilla <- linear_reg(engine = "glm" )
+
+# Combine recipe and model into a workflow
+vanilla_wf  <- workflow() |> 
+                  add_recipe(listing_recipe) |> 
+                  add_model(listing_vanilla)
+
+# Fit the model
+vanilla_fit <- vanilla_wf  |>  
+                 fit_resamples(Folds) 
+
+# Collect results
+Rez_vanilla <- vanilla_fit|> 
+               collect_metrics()
+
+Rez_vanilla
+
+
+
+All_Rez_rmse<-c() # define a vector that will hold all results (rmse)
+All_Rez_std<-c() # define a vector that will hold all results (std_err)
+
+All_Rez_rmse["vanilla"] <- Rez_vanilla$mean[1]	  # save estimated the generalization error
+All_Rez_std["vanilla"] <- Rez_vanilla$std_err[1]	  # save its standard error
+```
+
+
+```{r}
+#Regularized linear regression
+listing_glmnet <- linear_reg( engine = "glmnet", 
+                              penalty = tune(), # lambda : Bias vs Variance 
+                              mixture = tune()  # alpha : mixes Lasso and Ridge 
+                              ) 
+
+#Define a grid
+glmnet_grid <- expand.grid( mixture = seq(0, 1, by = 0.2), 
+                            penalty = 10^seq(-3, -0.5, by = 0.5)
+                            ) 
+                           
+
+# Combine recipe and model into a workflow 
+glmnet_wf <- workflow() |> 
+                        add_recipe(listing_recipe) |> 
+                        add_model(listing_glmnet)
+
+
+# Cross-Validation to try different values of parameters 
+glmnet_tune <- glmnet_wf |> 
+                       tune_grid(resamples = Folds,
+                                 grid=glmnet_grid)
+  
+# Collect results
+Rez_glmnet <- glmnet_tune|> 
+              collect_metrics() |> 
+              filter(.metric == "rmse") |> 
+              arrange(mean)
+
+Rez_glmnet 
+
+ggplot(data.frame(Rez_glmnet), aes(x=mixture, y=mean, colour=as.factor(penalty)))+
+  geom_line()
+
+
+All_Rez_rmse["glmnet"] <- Rez_glmnet$mean[1]	# save the best estimated generalization error  
+All_Rez_std["glmnet"] <-  Rez_glmnet$std_err[1]	# save its standard error
+  
+  
+```
+
+
+#Vanilla partition model 
+
+```{r}
+
+#Partition tree with tidymodels 
+listing_partition <- decision_tree(
+                       engine="rpart",
+                       mode="regression", 
+                       cost_complexity = tune()   # cp parameter
+                            )  
+  
+#Define a grid
+partition_grid <- expand.grid( cost_complexity = 10^seq(-5, -1, 0.5) )
+
+
+# Combine recipe and model into a workflow 
+partition_wf <- workflow() |> 
+                        add_recipe(listing_recipe) |> 
+                        add_model(listing_partition)
+
+
+# Cross-Validation to try different values of parameters 
+partition_tune <- partition_wf |> 
+                       tune_grid(resamples = Folds,
+                                 grid=partition_grid)
+  
+# Collect results
+Rez_partition <- partition_tune|> 
+              collect_metrics() |> 
+              filter(.metric == "rmse") |> 
+              arrange(mean)
+
+Rez_partition 
+
+ggplot(data.frame(Rez_partition), aes(x=cost_complexity, y=mean))+
+  geom_line()
+
+
+All_Rez_rmse["partition"] <- Rez_partition$mean[1]	  # save the best estimated generalization error  
+All_Rez_std["partition"] <-  Rez_partition$std_err[1]  	# save its standard error
+
+
+```
+
+#Random forest model
+
+```{r}
+
+#Random forest
+listing_forest <- rand_forest(mode = "regression", 
+                    mtry = tune()) |>
+                   set_engine(engine = "ranger", importance = "impurity")
+  
+#Define a grid
+forest_grid <- expand.grid(mtry = seq(1, 10) )   
+
+
+# Combine recipe and model into a workflow 
+forest_wf <- workflow() |> 
+                        add_recipe(listing_recipe) |> 
+                        add_model(listing_forest)
+
+
+# Cross-Validation to try different values of parameters 
+forest_tune <- forest_wf |> 
+                       tune_grid(resamples = Folds,
+                                 grid=forest_grid)
+  
+# Collect results
+Rez_forest <- forest_tune|> 
+              collect_metrics() |> 
+              filter(.metric == "rmse") |> 
+              arrange(mean)
+
+Rez_forest 
+ggplot(data.frame(Rez_forest), aes(x=mtry, y=mean))+
+  geom_line()
+
+All_Rez_rmse["random.forest"] <- Rez_forest$mean[1]   	# save the best estimated generalization error  
+All_Rez_std["random.forest"] <-  Rez_forest$std_err[1]    	# save its standard error
+
+```
+
+#Support vector machine with linear kernel
+
+```{r}
+#SVM with linear kernel
+listing_svm_linear <- svm_linear(    mode = "regression",
+                                   engine="kernlab",
+                                   cost = tune()
+                                  )
+
+#Define a grid
+svm_linear_grid <- expand.grid(cost=10^seq(-3.5, -0.5, by = 0.5) )
+
+
+# Combine recipe and model into a workflow 
+svm_linear_wf <- workflow() |> 
+                        add_recipe(listing_recipe) |> 
+                        add_model(listing_svm_linear)
+
+
+# Cross-Validation to try different values of parameters 
+svm_linear_tune <- svm_linear_wf |> 
+                       tune_grid(resamples = Folds,
+                                 grid=svm_linear_grid)
+  
+# Collect results
+Rez_svm_linear <- svm_linear_tune|> 
+                       collect_metrics() |> 
+                       filter(.metric == "rmse") |> 
+                       arrange(mean)
+
+Rez_svm_linear 
+
+
+ggplot(data.frame(Rez_svm_linear), aes(x=cost, y=mean))+
+  geom_line()
+
+
+All_Rez_rmse["svm.linear"] <- Rez_svm_linear$mean[1]	# save the best estimated generalization error  
+All_Rez_std["svm.linear"] <-  Rez_svm_linear$std_err[1]	# save its standard error
+
+
+```
+
+#Support vector machine with polynomial kernel
+
+```{r}
+#SVM with polynomial kernel
+listing_svm_poly <- svm_poly(  mode = "regression",
+                                   cost = tune(),
+                                   degree = tune(),
+                                   scale_factor = tune()
+                                  )
+
+#Define a grid
+svm_poly_grid <- expand.grid(degree=c(3,4),
+                             cost=10^seq(-2,1,by=.5),
+                             scale_factor=10^seq(-3,-1.5,by=.5))
+
+
+# Combine recipe and model into a workflow 
+svm_poly_wf <- workflow() |> 
+                        add_recipe(listing_recipe) |> 
+                        add_model(listing_svm_poly)
+
+
+# Cross-Validation to try different values of parameters 
+svm_poly_tune <- svm_poly_wf |> 
+                       tune_grid(resamples = Folds,
+                                 grid=svm_poly_grid)
+  
+# Collect results
+Rez_svm_poly <- svm_poly_tune|> 
+                       collect_metrics() |> 
+                       filter(.metric == "rmse") |> 
+                       arrange(mean)
+
+Rez_svm_poly 
+
+
+ggplot(data.frame(Rez_svm_poly), aes(x=cost, y=mean, colour=as.factor(scale_factor)))+
+  geom_line()+
+  facet_wrap(~degree)
+
+
+All_Rez_rmse["svm.poly"] <- Rez_svm_poly$mean[1]	# save the best estimated generalization error  
+All_Rez_std["svm.poly"] <-  Rez_svm_poly$std_err[1]	# save its standard error
+
+
+```
+
+#Support vector machine with radial basis kernel
+
+```{r}
+
+#SVM with radial basis kernel
+listing_svm_radial <- svm_rbf(  mode = "regression",
+                                   cost = tune(),
+                                   rbf_sigma = tune()
+                                  )
+
+#Define a grid
+svm_radial_grid <- expand.grid(rbf_sigma=10^seq(-3.5,-2,by=.5), 
+                               cost=10^seq(-1,1,by=.5) ) 
+
+
+# Combine recipe and model into a workflow 
+svm_radial_wf <- workflow() |> 
+                        add_recipe(listing_recipe) |> 
+                        add_model(listing_svm_radial)
+
+
+# Cross-Validation to try different values of parameters 
+svm_radial_tune <- svm_radial_wf |> 
+                       tune_grid(resamples = Folds,
+                                 grid=svm_radial_grid)
+  
+# Collect results
+Rez_svm_radial <- svm_radial_tune|> 
+                       collect_metrics() |> 
+                       filter(.metric == "rmse") |> 
+                       arrange(mean)
+
+Rez_svm_radial 
+
+
+ggplot(data.frame(Rez_svm_radial), aes(x=cost, y=mean, colour=as.factor(rbf_sigma)))+
+  geom_line()
+
+All_Rez_rmse["svm.radial"] <- Rez_svm_radial$mean[1]	# save the best estimated generalization error  
+All_Rez_std["svm.radial"] <-  Rez_svm_radial$std_err[1]	# save its standard error
+
+
+```
+*XG Boost*
+```{r}
+listing_xgb <- boost_tree(
+  mode = "regression",
+  trees = 1000,
+  learn_rate = tune(),
+  tree_depth = tune(),
+  loss_reduction = tune()
+) %>% 
+  set_engine("xgboost")
+
+xgb_grid <- expand.grid(
+  learn_rate = c(0.01, 0.05, 0.1),
+  tree_depth = c(3, 5, 7),
+  loss_reduction = c(0, 1, 5)
+)
+
+xgb_wf <- workflow() %>%
+  add_recipe(listing_recipe) %>%
+  add_model(listing_xgb)
+
+xgb_tune <- tune_grid(
+  xgb_wf,
+  resamples = Folds,
+  grid = xgb_grid
+)
+
+Rez_xgb <- xgb_tune %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%
+  arrange(mean)
+
+Rez_xgb
+All_Rez_rmse["xg_boost"] <- Rez_xgb$mean[1]	# save the best estimated generalization error  
+All_Rez_std["xg_boost"] <-  Rez_xgb$std_err[1]	# save its standard error
+```
+
+
+*Ensemble*
+```{r}
+GRID <- control_stack_grid()
+MODEL_ALL <- list(
+    RF = rand_forest( mode = 'regression', mtry = tune() )
+    ,
+    SVM = svm_rbf( mode = 'regression', cost = tune(), rbf_sigma = tune() )
+    ,
+    MLP = mlp( mode = 'regression', hidden_units = tune(), penalty = tune() )
+)
+
+tune_model <- function(model){
+    WF <- workflow(listing_recipe, model)
+
+    RES <- WF %>%
+        tune_grid(
+            resamples = Folds,
+            grid = 10,
+            control = GRID,
+        )
+
+    return(RES)
+}
+
+RES_ALL <- lapply(MODEL_ALL, tune_model)
+
+test_model <- function(model, res){
+    cv <- show_best(res, metric = 'rmse', n=1) %>% select(mean, std_err)
+
+    best <- res %>% select_best(metric = 'rmse')
+
+    final <- workflow(listing_recipe, model) %>%
+        finalize_workflow(best) %>%
+        last_fit(cleaned_splits) %>%
+        collect_metrics() %>%
+        filter(.metric=='rmse')
+
+    cv$final <- final$.estimate
+
+    cv <- unlist(cv)
+
+    return(cv)
+}
+#RF has the highest mean
+FINAL_ALL <- as.data.frame(mapply(test_model, MODEL_ALL, RES_ALL))
+
+FINAL_ALL
+```
+
+
+
+# Check all results for lowest RMSE
+```{r All-Results}
+ALL.Results <- data.frame("RMSE"= All_Rez_rmse, "RMSE_STD"= All_Rez_std)
+ALL.Results[order(ALL.Results$RMSE),]
+#Random Forest is the one for me
+```
+
+h. Pick the final model and fit it to TEST dataset.
+
+```{r Final-Model}
+
+#Model name:  
+## Depending on which model you chose, save in variable M one of these objects:
+##   vanila_fit
+##   glmnet_tune
+##   partition_tune
+##   forest_tune
+##   svm_linear_tune
+##   svm_poly_tune
+##   svm_radial_tune 
+##   xgb_tune
+
+M <- forest_tune
+
+# Then save corresponding workflow in a variable WF
+##   vanila_wf
+##   glmnet_wf
+##   partition_wf
+##   forest_wf
+##   svm_linear_wf
+##   svm_poly_wf
+##   svm_radial_wf 
+##   xgb_wf
+WF <- forest_wf
+
+
+
+
+# _____________
+# get the best parameters for a chosen model
+best_params <- M |> 
+  select_best(metric = "rmse")
+
+final_workflow <- finalize_workflow(WF, best_params)
+
+fit_final_workflow <- final_workflow |>
+  fit(cleaned_train)
+
+
+# Make predictions on TEST
+test_preds <- fit_final_workflow |>
+  predict(cleaned_test) |>
+  bind_cols(cleaned_test)
+test_preds <- test_preds |>
+  mutate(diff = price - .pred)
+sqrt(mean((test_preds$diff)^2))
+
+
+
+
+holdout_x <- read.csv("holdout_x_correct-1.csv")
+test_preds <- fit_final_workflow |>
+  predict(holdout_x)
+
+```
+
+
+
+
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+*training on full data against Holdout_x*
+```{r}
+listing_recipe <- recipe(price ~ ., data = cleaned_listing)  |> 
+               step_YeoJohnson(all_numeric_predictors())  |>       # transform
+               step_lincomb(all_numeric_predictors()) |>           # eliminate possible linear combos
+               step_zv(all_predictors()) |>
+               step_nzv(all_predictors()) |>               # eliminate near-zero variance Xs
+               step_corr(all_numeric_predictors())  |>             # eliminate highly correlated Xs
+               step_normalize(all_numeric_predictors()) |>         # scale + center
+               step_dummy(all_nominal_predictors())
+
+
+Folds <- vfold_cv(cleaned_listing, v = 5)
+# Vanilla model
+listing_vanilla <- linear_reg(engine = "glm" )
+
+# Combine recipe and model into a workflow
+vanilla_wf  <- workflow() |> 
+                  add_recipe(listing_recipe) |> 
+                  add_model(listing_vanilla)
+
+# Fit the model
+vanilla_fit <- vanilla_wf  |>  
+                 fit_resamples(Folds) 
+
+# Collect results
+Rez_vanilla <- vanilla_fit|> 
+               collect_metrics()
+
+Rez_vanilla
+
+
+
+All_Rez_rmse<-c() # define a vector that will hold all results (rmse)
+All_Rez_std<-c() # define a vector that will hold all results (std_err)
+
+All_Rez_rmse["vanilla"] <- Rez_vanilla$mean[1]	  # save estimated the generalization error
+All_Rez_std["vanilla"] <- Rez_vanilla$std_err[1]	  # save its standard error
+
+#Regularized linear regression
+listing_glmnet <- linear_reg( engine = "glmnet", 
+                              penalty = tune(), # lambda : Bias vs Variance 
+                              mixture = tune()  # alpha : mixes Lasso and Ridge 
+                              ) 
+
+#Define a grid
+glmnet_grid <- expand.grid( mixture = seq(0, 1, by = 0.2), 
+                            penalty = 10^seq(-3, -0.5, by = 0.5)
+                            ) 
+                           
+
+# Combine recipe and model into a workflow 
+glmnet_wf <- workflow() |> 
+                        add_recipe(listing_recipe) |> 
+                        add_model(listing_glmnet)
+
+
+# Cross-Validation to try different values of parameters 
+glmnet_tune <- glmnet_wf |> 
+                       tune_grid(resamples = Folds,
+                                 grid=glmnet_grid)
+  
+# Collect results
+Rez_glmnet <- glmnet_tune|> 
+              collect_metrics() |> 
+              filter(.metric == "rmse") |> 
+              arrange(mean)
+
+
+All_Rez_rmse["glmnet"] <- Rez_glmnet$mean[1]	# save the best estimated generalization error  
+All_Rez_std["glmnet"] <-  Rez_glmnet$std_err[1]	# save its standard error
+
+#Vanilla partition model 
+
+#Partition tree with tidymodels 
+listing_partition <- decision_tree(
+                       engine="rpart",
+                       mode="regression", 
+                       cost_complexity = tune()   # cp parameter
+                            )  
+  
+#Define a grid
+partition_grid <- expand.grid( cost_complexity = 10^seq(-5, -1, 0.5) )
+
+
+# Combine recipe and model into a workflow 
+partition_wf <- workflow() |> 
+                        add_recipe(listing_recipe) |> 
+                        add_model(listing_partition)
+
+
+# Cross-Validation to try different values of parameters 
+partition_tune <- partition_wf |> 
+                       tune_grid(resamples = Folds,
+                                 grid=partition_grid)
+  
+# Collect results
+Rez_partition <- partition_tune|> 
+              collect_metrics() |> 
+              filter(.metric == "rmse") |> 
+              arrange(mean)
+
+
+All_Rez_rmse["partition"] <- Rez_partition$mean[1]	  # save the best estimated generalization error  
+All_Rez_std["partition"] <-  Rez_partition$std_err[1]  	# save its standard error
+
+#Random forest model
+
+
+#Random forest
+listing_forest <- rand_forest(mode = "regression", 
+                    mtry = tune()) |>
+                   set_engine(engine = "ranger", importance = "impurity")
+  
+#Define a grid
+forest_grid <- expand.grid(mtry = seq(1, 10) )   
+
+
+# Combine recipe and model into a workflow 
+forest_wf <- workflow() |> 
+                        add_recipe(listing_recipe) |> 
+                        add_model(listing_forest)
+
+
+# Cross-Validation to try different values of parameters 
+forest_tune <- forest_wf |> 
+                       tune_grid(resamples = Folds,
+                                 grid=forest_grid)
+  
+# Collect results
+Rez_forest <- forest_tune|> 
+              collect_metrics() |> 
+              filter(.metric == "rmse") |> 
+              arrange(mean)
+
+All_Rez_rmse["random.forest"] <- Rez_forest$mean[1]   	# save the best estimated generalization error  
+All_Rez_std["random.forest"] <-  Rez_forest$std_err[1]    	# save its standard error
+
+#Support vector machine with linear kernel
+
+#SVM with linear kernel
+listing_svm_linear <- svm_linear(    mode = "regression",
+                                   engine="kernlab",
+                                   cost = tune()
+                                  )
+
+#Define a grid
+svm_linear_grid <- expand.grid(cost=10^seq(-3.5, -0.5, by = 0.5) )
+
+
+# Combine recipe and model into a workflow 
+svm_linear_wf <- workflow() |> 
+                        add_recipe(listing_recipe) |> 
+                        add_model(listing_svm_linear)
+
+
+# Cross-Validation to try different values of parameters 
+svm_linear_tune <- svm_linear_wf |> 
+                       tune_grid(resamples = Folds,
+                                 grid=svm_linear_grid)
+  
+# Collect results
+Rez_svm_linear <- svm_linear_tune|> 
+                       collect_metrics() |> 
+                       filter(.metric == "rmse") |> 
+                       arrange(mean)
+
+All_Rez_rmse["svm.linear"] <- Rez_svm_linear$mean[1]	# save the best estimated generalization error  
+All_Rez_std["svm.linear"] <-  Rez_svm_linear$std_err[1]	# save its standard error
+
+
+#Support vector machine with polynomial kernel
+
+#SVM with polynomial kernel
+listing_svm_poly <- svm_poly(  mode = "regression",
+                                   cost = tune(),
+                                   degree = tune(),
+                                   scale_factor = tune()
+                                  )
+
+#Define a grid
+svm_poly_grid <- expand.grid(degree=c(3,4),
+                             cost=10^seq(-2,1,by=.5),
+                             scale_factor=10^seq(-3,-1.5,by=.5))
+
+
+# Combine recipe and model into a workflow 
+svm_poly_wf <- workflow() |> 
+                        add_recipe(listing_recipe) |> 
+                        add_model(listing_svm_poly)
+
+
+# Cross-Validation to try different values of parameters 
+svm_poly_tune <- svm_poly_wf |> 
+                       tune_grid(resamples = Folds,
+                                 grid=svm_poly_grid)
+  
+# Collect results
+Rez_svm_poly <- svm_poly_tune|> 
+                       collect_metrics() |> 
+                       filter(.metric == "rmse") |> 
+                       arrange(mean)
+
+
+All_Rez_rmse["svm.poly"] <- Rez_svm_poly$mean[1]	# save the best estimated generalization error  
+All_Rez_std["svm.poly"] <-  Rez_svm_poly$std_err[1]	# save its standard error
+
+
+#Support vector machine with radial basis kernel
+
+
+#SVM with radial basis kernel
+listing_svm_radial <- svm_rbf(  mode = "regression",
+                                   cost = tune(),
+                                   rbf_sigma = tune()
+                                  )
+
+#Define a grid
+svm_radial_grid <- expand.grid(rbf_sigma=10^seq(-3.5,-2,by=.5), 
+                               cost=10^seq(-1,1,by=.5) ) 
+
+
+# Combine recipe and model into a workflow 
+svm_radial_wf <- workflow() |> 
+                        add_recipe(listing_recipe) |> 
+                        add_model(listing_svm_radial)
+
+
+# Cross-Validation to try different values of parameters 
+svm_radial_tune <- svm_radial_wf |> 
+                       tune_grid(resamples = Folds,
+                                 grid=svm_radial_grid)
+  
+# Collect results
+Rez_svm_radial <- svm_radial_tune|> 
+                       collect_metrics() |> 
+                       filter(.metric == "rmse") |> 
+                       arrange(mean)
+
+
+All_Rez_rmse["svm.radial"] <- Rez_svm_radial$mean[1]	# save the best estimated generalization error  
+All_Rez_std["svm.radial"] <-  Rez_svm_radial$std_err[1]	# save its standard error
+
+#*Ensemble*
+
+listing_recipe <- recipe(price ~ ., data = listing_cluster)  |> 
+               step_YeoJohnson(all_numeric_predictors())  |>       # transform
+               step_lincomb(all_numeric_predictors()) |>           # eliminate possible linear combos
+               step_zv(all_predictors()) |>
+               step_nzv(all_predictors()) |>               # eliminate near-zero variance Xs
+               step_corr(all_numeric_predictors())  |>             # eliminate highly correlated Xs
+               step_normalize(all_numeric_predictors()) |>         # scale + center
+               step_dummy(all_nominal_predictors())
+
+
+CV <- vfold_cv(listing_cluster, v = 5)
+GRID <- control_stack_grid()
+MODEL_ALL <- list(
+    RF = rand_forest( mode = 'regression', mtry = tune() )
+    ,
+    SVM = svm_rbf( mode = 'regression', cost = tune(), rbf_sigma = tune() )
+    ,
+    MLP = mlp( mode = 'regression', hidden_units = tune(), penalty = tune() )
+)
+
+tune_model <- function(model){
+    WF <- workflow(listing_recipe, model)
+
+    RES <- WF %>%
+        tune_grid(
+            resamples = CV,
+            grid = 10,
+            control = GRID,
+        )
+
+    return(RES)
+}
+
+RES_ALL <- lapply(MODEL_ALL, tune_model)
+
+test_model <- function(model, res){
+    cv <- show_best(res, metric = 'rmse', n=1) %>% select(mean, std_err)
+
+    best <- res %>% select_best(metric = 'rmse')
+
+    final <- workflow(listing_recipe, model) %>%
+        finalize_workflow(best) %>%
+        last_fit(cluster_splits) %>%
+        collect_metrics() %>%
+        filter(.metric=='rmse')
+
+    cv$final <- final$.estimate
+
+    cv <- unlist(cv)
+
+    return(cv)
+}
+
+FINAL_ALL <- as.data.frame(mapply(test_model, MODEL_ALL, RES_ALL))
+FINAL_ALL
+
+listing_xgb <- boost_tree(
+  mode = "regression",
+  trees = 1000,
+  learn_rate = tune(),
+  tree_depth = tune(),
+  loss_reduction = tune()
+) %>% 
+  set_engine("xgboost")
+
+xgb_grid <- expand.grid(
+  learn_rate = c(0.01, 0.05, 0.1),
+  tree_depth = c(3, 5, 7),
+  loss_reduction = c(0, 1, 5)
+)
+
+xgb_wf <- workflow() %>%
+  add_recipe(listing_recipe) %>%
+  add_model(listing_xgb)
+
+xgb_tune <- tune_grid(
+  xgb_wf,
+  resamples = Folds,
+  grid = xgb_grid
+)
+
+Rez_xgb <- xgb_tune %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%
+  arrange(mean)
+
+Rez_xgb
+```
+
+
+
+
+```{r All-Results}
+ALL.Results <- data.frame("RMSE"= All_Rez_rmse, "RMSE_STD"= All_Rez_std)
+ALL.Results[order(ALL.Results$RMSE),]
+```
+
+```{r Final-Model}
+
+#Model name:  
+## Depending on which model you chose, save in variable M one of these objects:
+##   vanila_fit
+##   glmnet_tune
+##   partition_tune
+##   forest_tune
+##   svm_linear_tune
+##   svm_poly_tune
+##   svm_radial_tune 
+
+M <- forest_tune
+
+# Then save corresponding workflow in a variable WF
+##   vanila_wf
+##   glmnet_wf
+##   partition_wf
+##   forest_wf
+##   svm_linear_wf
+##   svm_poly_wf
+##   svm_radial_wf 
+
+WF <- forest_wf
+
+
+
+
+# _____________
+# get the best parameters for a chosen model
+best_params <- M |> 
+  select_best(metric = "rmse")
+summary(best_params)
+final_workflow <- finalize_workflow(WF, best_params)
+
+fit_final_workflow <- final_workflow |>
+  fit(cleaned_listing)
+summary(fit_final_workflow)
+
+# Make predictions on TEST
+test_preds <- fit_final_workflow |>
+  predict(cleaned_listing) |>
+  bind_cols(cleaned_listing)
+test_preds <- test_preds |>
+  mutate(diff = price - .pred)
+sqrt(mean((test_preds$diff)^2))
+
+#Make predictions on Holdout
+nrow(holdout_x)
+holdout_x <- read.csv("holdout_x_correct-1.csv")
+holdout_x <- replace_na(0)
+sum(is.na(holdout_x))
+holdout_x[which(is.na(holdout_x)),]
+test_preds <- fit_final_workflow |>
+  predict(holdout_x) |>
+  mutate(id = holdout_x$id)
+
+#write.csv(test_preds, "test_preds_4_30.csv")
+
+summary(cluster_test$price)
+
+summary(LISTING$price)
+hist(cluster_test$price)
+hist(test_preds$.pred)
+```
+
+
+```{r}
+write.csv(test_preds, 'test_preds_5_7.csv')
+test_preds <- test_preds |>
+  mutate(price = .pred) |>
+  select(id, price)
+```
+
