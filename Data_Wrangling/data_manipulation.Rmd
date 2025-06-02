@@ -1,0 +1,155 @@
+---
+title: "Data manipulation"
+author: "Sage Gray"
+date: "2025-04-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(fpp3)
+library(plotly)
+library(DBI)
+```
+
+```{r}
+
+mydb <- dbConnect(RSQLite::SQLite(), "mtg.sqlite")
+dbGetQuery(mydb, 'SELECT * FROM price_list LIMIT 8')
+dbDisconnect(mydb)
+
+price_list
+#colnames(price_list)
+price_list <- price_list |>
+  pivot_longer(cols = -name, names_to = "date", values_to = "price") |>
+  mutate(date = mdy(date))
+price_list
+name <- "Garruk Relentless" #input
+price_list[price_list$name == name,]
+temp <- price_list[price_list$name == name,]
+temp$names <- NULL
+temp
+temp |>
+  tsibble(index = date) |>
+  autoplot() |>
+  ggplotly()
+
+
+innistrad_cards |>
+                    filter(rarity == "Mythic") |>
+                    unique()
+
+
+#Making RoCs
+names <- dbGetQuery(carddb, 'SELECT name FROM card_list')
+dates <- dbGetQuery(mydb, 'SELECT date FROM price_list')
+
+head(unique(dates), 10)
+for(i in 1:length(names)){
+    diff <- c()
+    tempo <- dbGetQuery(mydb, 'SELECT * FROM price_list WHERE "name" == :x',
+               params = list(x = names[i]))
+  for(j in 1:length( unique(dates)-1 )){
+    diff[i] <- temp$price[i] - temp$price[i+1]
+    #if value above or below mean(diff),
+  }
+}
+
+
+#Using SQLITE DB
+name <- "Past in Flames"
+#dbGetQuery(mydb, 'SELECT * FROM price_list WHERE "name" == "Garruk Relentless"')
+temp <- dbGetQuery(mydb, 'SELECT * FROM price_list WHERE "name" == :x',
+           params = list(x = name))
+max(diff(temp$price))
+
+
+
+
+#Iterating through all RoCs
+names <- dbGetQuery(carddb, 'SELECT name FROM card_list')
+top_five_price <- NULL
+top_five_price <- data.frame(Price, Name)
+  
+top_five_name <- c()
+top_five_price <- c(0)
+diff(temp$price)
+for(i in 1:length(names$name)) {
+  name <- names[i,]
+  temp <- dbGetQuery(mydb, 'SELECT * FROM price_list WHERE "name" == :x',
+                     params = list(x = name))
+  if( length(top_five_price) < 5 ){
+    top_five_price <- append( top_five_price, max(diff(temp$price)) )
+    top_five_name <- append(top_five_name, unique(temp$name))
+  } else if(max(diff(temp$price)) > min(top_five_price)){
+    
+    top_five_price[which(top_five_price == min(top_five_price))][1] <- max(diff(temp$price)) 
+    top_five_name[which(top_five_price == min(top_five_price))][1] <- unique(temp$name)
+  }
+}
+
+#Differential Code
+temp <- dbGetQuery(mydb, 'SELECT * FROM price_list WHERE "name" == :x',
+           params = list(x = name))
+
+top_five_price <- top_five_price |>
+  append(max(diff(temp$price)))
+
+
+top_five_price[which(top_five_price == min(top_five_price))][1]
+plot(diff(temp$price))
+
+length(top_five_price)
+if( length(top_five_price) < 5 ){
+    top_five_price <- append( top_five_price, max(diff(temp$price)) )
+    top_five_name <- append(top_five_name, unique(temp$name))
+  } else if(max(diff(temp$price)) > min(top_five_price)){
+    top_five_price[which(top_five_price == min(top_five_price))][1] <- max(diff(temp$price)) 
+    top_five_name[which(top_five_price == min(top_five_price))][1] <- unique(temp$name)
+  }
+```
+
+```{r}
+# Get all distinct names
+names <- dbGetQuery(mydb, 'SELECT DISTINCT name FROM price_list')$name
+
+# Initialize empty data frame to store results
+price_changes <- data.frame(name = character(), change = numeric(), stringsAsFactors = FALSE)
+
+# Loop over each name and compute recent price change
+for (n in names) {
+  temp <- dbGetQuery(mydb, 'SELECT price FROM price_list WHERE name = ? ORDER BY date DESC', 
+                     params = list(n))
+  
+  if (nrow(temp) >= 2) {
+    # Change between most recent and previous price
+    price_diff <- temp$price[1] - temp$price[2]
+    price_changes <- rbind(price_changes, data.frame(name = n, change = price_diff))
+  }
+}
+
+# Get top 5 absolute price changes (largest magnitude)
+top_5 <- price_changes[order(-abs(price_changes$change)), ][1:5, ]
+dbWriteTable(mydb, "top_5", top_5)
+
+dbListTables(mydb)
+# View result
+print(top_5)
+
+for(i in 1:5){
+  name <- top_5$name[i]
+      temp <- dbGetQuery(mydb, 'SELECT * FROM price_list WHERE "name" == :x',
+                         params = list(x = name))
+      temp %>%
+        mutate(date = as.Date(date)) |>
+        tsibble(index = date) %>%
+        autoplot(price) %>%
+        ggplotly()
+}
+
+dbDisconnect(mydb)
+dbDisconnect(carddb)
+```
+
+

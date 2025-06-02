@@ -1,0 +1,381 @@
+---
+title: "Web_Scraping"
+author: "Sage Gray"
+date: "2025-03-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#grab rvest through tidyverse and polite
+library(tidyverse)
+library(polite)
+library(rvest)
+library(RSelenium)
+library(wdman)
+library(httr)
+library(dplyr)
+```
+
+*Initial Scrape*
+```{r}
+#Grabs all aspects other than price for indexing:
+#   Name
+#   Rarity
+#   Image url
+
+
+# Load required libraries
+library(RSelenium)
+library(rvest)
+library(dplyr)
+library(tibble)
+
+# Start the RSelenium server
+driver <- rsDriver(browser = "firefox", port = 4567L, verbose = TRUE, 
+                   chromever = NULL, geckover = "latest")
+remote_driver <- driver[["client"]]
+
+# Navigate to the TCGPlayer Innistrad page
+remote_driver$navigate("https://www.tcgplayer.com/search/magic/innistrad?productLineName=magic&setName=innistrad&view=grid&page=1&ProductTypeName=Cards")
+
+# Wait for page to load (adjust time as needed)
+Sys.sleep(5)
+
+
+# Function to scroll down the page to load all cards
+scroll_to_bottom <- function(remote_driver) {
+  # Script to get page height
+  script <- "return document.body.scrollHeight"
+  height <- remote_driver$executeScript(script)[[1]]
+  
+  # Scroll in increments
+  for (i in seq(0, height, 500)) {
+    remote_driver$executeScript(paste0("window.scrollTo(0, ", i, ")"))
+    Sys.sleep(0.5)  # Short pause between scrolls
+  }
+  
+  # Wait for everything to load
+  Sys.sleep(3)
+}
+
+
+# Create empty lists to store data
+card_names <- c()
+card_prices <- c()
+card_rarities <- c()
+card_images <- c()
+
+repeat {
+  # Scroll down to load all cards before extracting
+  scroll_to_bottom(remote_driver)
+  Sys.sleep(2)  # Adjust as needed
+  
+  # Extract card data from the current page
+  page_source <- remote_driver$getPageSource()[[1]]
+  html_content <- read_html(page_source)
+  
+  # Extract card names
+  cards <- html_content %>% html_nodes(".search-result")
+
+  for (card in cards) {
+    # Extract card name
+    name_element <- html_nodes(card, "a")  # If the title is inside an anchor tag
+    name <- ifelse(length(name_element) > 0, html_text(name_element), NA)
+    name <- gsub("^(Innistrad|Mythic|Rare|Uncommon|Common|Foil)[^a-zA-Z]*", "", name)
+    name <- gsub("\\d+ listings.*$", "", name)
+    name <- gsub("Market Price:.*$", "", name)
+    name <- trimws(name)  # Ensure there are no extra spaces
+    
+    # Remove set name, rarity, and card number
+    name <- gsub("^(Innistrad|Mythic|Rare|Uncommon|Common|Foil)[^a-zA-Z]*#\\d+\\s*", "", name)
+    
+    # Remove extra details like listing count and market price
+    name <- gsub("\\d+ listings.*$", "", name)
+    name <- gsub("Market Price:.*$", "", name)
+    
+    # Trim leading and trailing spaces
+    name <- trimws(name)
+    
+  
+  
+    # Extract card price
+    price_element <- html_nodes(card, ".inventory__price-with-shipping") # Adjust selector
+    price <- ifelse(length(price_element) > 0, html_text(price_element), NA)
+    
+    
+    #Extract Rarity
+    rarity_element <- html_nodes(card, ".product-card__rarity__variant")  # Update selector as needed
+    rarity <- ifelse(length(rarity_element) > 0, html_text(rarity_element), NA)
+    rarity <- gsub(",.*$", "", rarity)  # Remove everything after the comma
+    rarity <- trimws(rarity)
+    
+    #Extract img url
+    image_element <- html_nodes(card, "img")
+    
+    # Pull srcset attribute
+    srcset <- ifelse(length(image_element) > 0, html_attr(image_element, "srcset"), NA)
+    
+    # Extract 1000x1000 URL from srcset
+    image_url <- NA
+    if (!is.na(srcset)) {
+      # Split the srcset string by commas
+      urls <- strsplit(srcset, ",")[[1]]
+      
+      # Look for the entry ending with "1000w"
+      match_1000 <- grep("1000w", urls, value = TRUE)
+      
+      # Extract the URL part only
+      if (length(match_1000) > 0) {
+        image_url <- trimws(gsub("\\s+1000w$", "", match_1000))
+      }
+    }
+      
+    # Print output for debugging
+    print(name)
+    
+    # Add to our lists
+    card_names <- c(card_names, name)
+    card_prices <- c(card_prices, price)
+    card_rarities <- c(card_rarities, rarity)
+    card_images <- c(card_images, image_url)
+  }
+  # Check if "Next" button exists
+  next_button <- remote_driver$findElements("xpath", "//div[@data-testid='search-pagination']/a[@aria-label='Next page' and @disabled='false']")
+  #print(next_button)
+  
+  if (length(next_button) == 0) {
+    message("No more pages to scrape.")
+    break  # Stop loop if no "Next" button
+  }
+  
+  # Click "Next" button
+  remote_driver$executeScript("arguments[0].click();", list(next_button[[1]]))
+  Sys.sleep(3)  # Wait for page to load
+}
+
+
+# Create a data frame with the results
+innistrad_cards <- tibble(
+  name = card_names,
+  rarity = card_rarities,
+  image_url = card_images
+#  price = card_prices
+)
+
+# Clean the price data (remove $ and convert to numeric)
+#innistrad_cards <- innistrad_cards %>%
+  #mutate(price = gsub("[$]", "", price))
+
+# View the results
+print(innistrad_cards)
+
+# Save the results to a CSV file
+write.csv(innistrad_cards, "innistrad_cards.csv", row.names = FALSE)
+
+# Close the browser and server
+remote_driver$close()
+driver[["server"]]$stop()
+```
+
+*Price Scraping*
+```{r}
+# Load required libraries
+
+
+library(RSelenium)
+library(rvest)
+library(dplyr)
+library(tibble)
+
+# Start the RSelenium server
+driver <- rsDriver(browser = "firefox", port = 4567L, verbose = TRUE, 
+                   chromever = NULL, geckover = "latest")
+remote_driver <- driver[["client"]]
+
+# Navigate to the TCGPlayer Innistrad page
+remote_driver$navigate("https://www.tcgplayer.com/search/magic/innistrad?productLineName=magic&setName=innistrad&view=grid&page=1&ProductTypeName=Cards")
+
+# Wait for page to load (adjust time as needed)
+Sys.sleep(5)
+
+
+# Function to scroll down the page to load all cards
+scroll_to_bottom <- function(remote_driver) {
+  # Script to get page height
+  script <- "return document.body.scrollHeight"
+  height <- remote_driver$executeScript(script)[[1]]
+  
+  # Scroll in increments
+  for (i in seq(0, height, 500)) {
+    remote_driver$executeScript(paste0("window.scrollTo(0, ", i, ")"))
+    Sys.sleep(0.5)  # Short pause between scrolls
+  }
+  
+  # Wait for everything to load
+  Sys.sleep(3)
+}
+
+
+# Create empty lists to store data
+card_names <- c()
+card_prices <- c()
+
+repeat {
+  # Scroll down to load all cards before extracting
+  scroll_to_bottom(remote_driver)
+  Sys.sleep(2)  # Adjust as needed
+  
+  # Extract card data from the current page
+  page_source <- remote_driver$getPageSource()[[1]]
+  html_content <- read_html(page_source)
+  
+  # Extract card names
+  cards <- html_content %>% html_nodes(".search-result")
+
+  for (card in cards) {
+    # Extract card name
+    name_element <- html_nodes(card, "a")  # If the title is inside an anchor tag
+    name <- ifelse(length(name_element) > 0, html_text(name_element), NA)
+    name <- gsub("^(Innistrad|Mythic|Rare|Uncommon|Common|Foil)[^a-zA-Z]*", "", name)
+    name <- gsub("\\d+ listings.*$", "", name)
+    name <- gsub("Market Price:.*$", "", name)
+    name <- trimws(name)  # Ensure there are no extra spaces
+    
+    # Remove set name, rarity, and card number
+    name <- gsub("^(Innistrad|Mythic|Rare|Uncommon|Common|Foil)[^a-zA-Z]*#\\d+\\s*", "", name)
+    
+    # Remove extra details like listing count and market price
+    name <- gsub("\\d+ listings.*$", "", name)
+    name <- gsub("Market Price:.*$", "", name)
+    
+    # Trim leading and trailing spaces
+    name <- trimws(name)
+    
+  
+  
+    # Extract card price
+    price_element <- html_nodes(card, ".inventory__price-with-shipping") # Adjust selector
+    price <- ifelse(length(price_element) > 0, html_text(price_element), NA)
+    
+    # 
+    # #Extract Rarity
+    # rarity_element <- html_nodes(card, ".product-card__rarity__variant")  # Update selector as needed
+    # rarity <- ifelse(length(rarity_element) > 0, html_text(rarity_element), NA)
+    # rarity <- gsub(",.*$", "", rarity)  # Remove everything after the comma
+    # rarity <- trimws(rarity)
+    # 
+    # #Extract img url
+    # image_element <- html_nodes(card, "img")
+    # 
+    # # Pull srcset attribute
+    # srcset <- ifelse(length(image_element) > 0, html_attr(image_element, "srcset"), NA)
+    # 
+    # # Extract 1000x1000 URL from srcset
+    # image_url <- NA
+    # if (!is.na(srcset)) {
+    #   # Split the srcset string by commas
+    #   urls <- strsplit(srcset, ",")[[1]]
+    #   
+    #   # Look for the entry ending with "1000w"
+    #   match_1000 <- grep("1000w", urls, value = TRUE)
+    #   
+    #   # Extract the URL part only
+    #   if (length(match_1000) > 0) {
+    #     image_url <- trimws(gsub("\\s+1000w$", "", match_1000))
+    #   }
+    # }
+    #   
+    # Print output for debugging
+    print(name)
+    
+    # Add to our lists
+    card_names <- c(card_names, name)
+    card_prices <- c(card_prices, price)
+    # card_rarities <- c(card_rarities, rarity)
+    # card_images <- c(card_images, image_url)
+  }
+  # Check if "Next" button exists
+  next_button <- remote_driver$findElements("xpath", "//div[@data-testid='search-pagination']/a[@aria-label='Next page' and @disabled='false']")
+  #print(next_button)
+  
+  if (length(next_button) == 0) {
+    message("No more pages to scrape.")
+    break  # Stop loop if no "Next" button
+  }
+  
+  # Click "Next" button
+  remote_driver$executeScript("arguments[0].click();", list(next_button[[1]]))
+  Sys.sleep(3)  # Wait for page to load
+}
+
+
+# Create a data frame with the results
+todays_card_prices <- tibble(
+  name = card_names,
+  # rarity = card_rarities,
+  # image_url = card_images,
+  price = card_prices
+)
+
+# Clean the price data (remove $ and convert to numeric)
+todays_card_prices<- todays_card_prices %>%
+  mutate(price = gsub("[$]", "", price))
+
+# View the results
+print(todays_card_prices)
+
+# Save the results to a CSV file
+write.csv(todays_card_prices, "card_prices[4_15].csv", row.names = FALSE)
+
+# Close the browser and server
+remote_driver$close()
+driver[["server"]]$stop()
+```
+*Price List Code*
+```{r}
+#TODO: Convert to sqlite db
+# df1 <- read.csv("card_prices[4_8].csv")#4/8
+# df2 <- read.csv("card_prices[4_9].csv")#4/9
+# df3 <- read.csv("card_prices[4_10].csv")#4/2
+# df4 <- read.csv("card_prices[4_11].csv")#4/3
+# df5 <- read.csv("card_prices[4_12].csv")#4/12
+# df6 <- read.csv("card_prices[4_13].csv")#4/5
+df7 <- read.csv("card_prices[4_15].csv")
+df7
+
+price_list <- read.csv("price_list.csv")
+
+price_list <- merge(price_list, df7, by = "name")
+
+names(price_list)[length(names(price_list))] <- "April 15 2025"
+print(n = 24, price_list[duplicated(price_list),])
+price_list <- distinct(price_list)
+
+price_list[duplicated(price_list),]
+print(price_list[which(price_list$name == "Garruk Relentless"),])
+write.csv(price_list, "price_list.csv", row.names = FALSE)
+```
+
+*SQLITE*
+```{r}
+library(DBI)
+library(fpp3)
+price_list <- read.csv("price_list.csv")
+card_list <- read.csv("innistrad_cards.csv")
+mydb <- dbConnect(RSQLite::SQLite(), "mtg.sqlite")
+carddb <- dbConnect(RSQLite::SQLite(), "cards.sqlite")
+
+dbWriteTable(carddb, 'card_list', card_list)
+
+price_list <- price_list |>
+  pivot_longer(cols = -name, names_to = "date", values_to = "price") |>
+  mutate(date = mdy(date))
+dbWriteTable(mydb, 'price_list', price_list, overwrite = TRUE)
+
+#dbWriteTable(mydb, "price_list", price_list)
+dbGetQuery(mydb, 'SELECT * FROM price_list WHERE name == "Garruk Relentless"')
+dbDisconnect(mydb)
+dbDisconnect(carddb)
+```
+

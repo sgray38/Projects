@@ -1,0 +1,12 @@
+name: magic_scrape
+title: magic_scrape
+username: sgray38
+account: sgray38
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 14575643
+bundleId: 10213284
+url: https://sgray38.shinyapps.io/magic_scrape/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
