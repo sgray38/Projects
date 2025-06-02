@@ -1,0 +1,1 @@
+  This was my first class on Machine Learning. The project involved predicting Credit Card Fraud from a kaggle dataset. Our initial model used a Logistic Regression Classifier, and the final model we landed on was Adaboosted Decision Stumps. This gave us a final ROC AUC score of 94%.
